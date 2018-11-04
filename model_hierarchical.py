@@ -52,34 +52,148 @@ class Encoder(nn.Module):
 
 class CoAttention(nn.Module):
 
-    def __init__(self, encoder_visual_context_dimension, encoder_semantic_context_dimension, hidden_dim, attention_dim):
+    def __init__(self, encoder_visual_context_dimension, encoder_semantic_context_dimension, ctx_dim, hidden_dim, attention_dim):
         super(CoAttention, self).__init__()
 
         self.encoder_visual_attention = nn.Linear(encoder_visual_context_dimension, attention_dim)  # linear layer to transform encoded visual context
         self.encoder_semantic_attention = nn.Linear(encoder_semantic_context_dimension, attention_dim)  # linear layer to transform encoded semantic context
 
-        self.hidden_dim_attention = nn.Linear(hidden_dim, attention_dim) #hidden dim transform
+        self.hidden_dim_attention_visual = nn.Linear(hidden_dim, attention_dim) #hidden dim transform
+        self.hidden_dim_attention_semantic = nn.Linear(hidden_dim, attention_dim)  # hidden dim transform
 
-        self.full_attention = nn.Linear(attention_dim, 1)
+        self.full_attention_visual = nn.Linear(attention_dim, 1)
+        self.full_attention_semantic = nn.Linear(attention_dim, 1)
+
         self.tanh = nn.Tanh()
+
+
         self.softmax = nn.Softmax(dim=1)  # softmax layer to calculate weights
+
+
+        self.fullyconnected_ctx = nn.Linear(encoder_semantic_context_dimension+encoder_visual_context_dimension, ctx_dim)  #fully connected layer to transform "a_att" and "v_att" to "ctx"
 
     def forward(self, visual_features, semantic_features, hidden_lol):
         att1_visual = self.encoder_visual_attention(visual_features)
         att1_semantic = self.encoder_semantic_attention(semantic_features)
-        att_hidden = self.hidden_dim_attention(hidden_lol)
 
-        att_fullvisual = self.full_attention(self.tanh(att1_visual + att_hidden.unsqueeze(1))).squeeze(2)
-        att_fullsemantic = self.full_attention(self.tanh(att1_semantic + att_hidden.unsqueeze(1))).squeeze(2)
+        att_hidden_visual = self.hidden_dim_attention(hidden_lol)
+        att_hidden_semantic = self.hidden_dim_attention(hidden_lol)
+
+        att_fullvisual = self.full_attention_visual(self.tanh(att1_visual + att_hidden_visual.unsqueeze(1))).squeeze(2)
+        att_fullsemantic = self.full_attention_semantic(self.tanh(att1_semantic + att_hidden_semantic.unsqueeze(1))).squeeze(2)
 
         alpha_visual = self.softmax(att_fullvisual)
         alpha_semantic = self.softmax(att_fullsemantic)
 
+        v_att = (visual_features*alpha_visual.unsqueeze(2)).sum(dim = 1)  #visual attention vector [batch_size, numattentionvecs]
+        a_att = (semantic_features*alpha_semantic.unsqueeze(2)).sum(dim = 1)  #semantic attention vector
 
-        #etc, fortsätt här
+        concat_att = torch.cat((v_att, a_att), 1) #concatenates v_att and a_att
+        ctx = self.fullyconnected_ctx(concat_att)  #co-attention context vector
+
+        return ctx
+
+class MLC(nn.Module):
+
+    def __init__(self, encoder_dimension, tag_dimension):  #from features a single fully connected layer computes tags.
+        print('lalal')
+        self.mlc = nn.Linear(encoder_dimension, 1)
+
+        self.softmax = nn.Softmax(dim = 1) # 1?
+
+    def forward(self, visual_features):
+        print('qweqweqweqweqweqweqwe')
+
+        tags = self.mlc(visual_features)
+        tags_softmax = self.softmax(tags) #????
+        return tags_softmax
 
 
 
 
+class SentenceLSTMDecoder(nn.Module):
 
+    def __init__(self, attention_dim, embed_dim, decoder_dim, vocab_size, encoder_visual_dim=2048, encoder_semantic_dim=2048, ctx_dim = 2048, dropout=0.5):
+        """
+        :param attention_dim: size of attention network
+        :param embed_dim: embedding size
+        :param decoder_dim: size of decoder's RNN
+        :param vocab_size: size of vocabulary
+        :param encoder_dim: feature size of encoded images
+        :param dropout: dropout
+        """
+
+
+        #TODO
+        #double check.
+        super(SentenceLSTMDecoder, self).__init__()
+
+        self.encoder_visual_dim = encoder_visual_dim
+        self.encoder_semantic_dim = encoder_semantic_dim
+        self.ctx_dim = ctx_dim
+        self.attention_dim = attention_dim  #dimension of ctx vector
+        self.embed_dim = embed_dim  #word embedding?
+        self.decoder_dim = decoder_dim  #hidden state dim?
+        self.vocab_size = vocab_size
+        self.dropout = dropout
+
+        self.attention = CoAttention(encoder_visual_dim, encoder_semantic_dim, ctx_dim, decoder_dim, attention_dim)  # attention network
+
+        self.embedding = nn.Embedding(vocab_size, embed_dim)  # embedding layer
+        self.dropout = nn.Dropout(p=self.dropout)
+        self.decode_step = nn.LSTMCell(embed_dim + ctx_dim, decoder_dim, bias=True)  # decoding LSTMCell
+        self.init_h = nn.Linear(ctx_dim, decoder_dim)  # linear layer to find initial hidden state of LSTMCell
+        self.init_c = nn.Linear(ctx_dim, decoder_dim)  # linear layer to find initial cell state of LSTMCell
+
+        #behövs dessa?
+        self.f_beta = nn.Linear(decoder_dim, ctx_dim)  # linear layer to create a sigmoid-activated gate
+        self.sigmoid = nn.Sigmoid()
+        self.fc = nn.Linear(decoder_dim, vocab_size)  # linear layer to find scores over vocabulary
+        self.init_weights()  # initialize some layers with the uniform distribution
+
+    def init_weights(self):
+        """
+        Initializes some parameters with values from the uniform distribution, for easier convergence.
+        """
+        self.embedding.weight.data.uniform_(-0.1, 0.1)
+        self.fc.bias.data.fill_(0)
+        self.fc.weight.data.uniform_(-0.1, 0.1)
+
+    def load_pretrained_embeddings(self, embeddings):
+        """
+        Loads embedding layer with pre-trained embeddings.
+        :param embeddings: pre-trained embeddings
+        """
+        self.embedding.weight = nn.Parameter(embeddings)
+
+    def fine_tune_embeddings(self, fine_tune=True):
+        """
+        Allow fine-tuning of embedding layer? (Only makes sense to not-allow if using pre-trained embeddings).
+        :param fine_tune: Allow?
+        """
+        for p in self.embedding.parameters():
+            p.requires_grad = fine_tune
+
+    def init_hidden_state(self, encoder_out):
+        """
+        Creates the initial hidden and cell states for the decoder's LSTM based on the encoded images.
+        :param encoder_out: encoded images, a tensor of dimension (batch_size, num_pixels, encoder_dim)
+        :return: hidden state, cell state
+        """
+        mean_encoder_out = encoder_out.mean(dim=1)
+        h = self.init_h(mean_encoder_out)  # (batch_size, decoder_dim)
+        c = self.init_c(mean_encoder_out)
+        return h, c
+
+    def forward(self, encoder_out):
+        print('lol')
+        batch_size = encoder_out.size(0)
+        encoder_dim = encoder_out.size(-1)
+
+        # Flatten image
+        encoder_out = encoder_out.view(batch_size, -1, encoder_dim)  # (batch_size, num_pixels, encoder_dim)
+        num_pixels = encoder_out.size(1) #number of visual feature vectors
+
+        #Co-Attention
+        #fixa
 
