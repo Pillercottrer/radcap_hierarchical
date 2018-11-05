@@ -95,16 +95,28 @@ class CoAttention(nn.Module):
 
 class MLC(nn.Module):
 
-    def __init__(self, encoder_dimension, tag_dimension):  #from features a single fully connected layer computes tags.
+    def __init__(self, num_pixels, encoder_dimension, tag_dimension):  #from features a single fully connected layer computes tags.
         print('lalal')
-        self.mlc = nn.Linear(encoder_dimension, 1)
+        super(MLC, self).__init__()
+        self.encoder_dimension = encoder_dimension
+        self.tag_dimension = tag_dimension
+        self.num_pixels = num_pixels
+
+        self.mlc = nn.Linear(encoder_dimension*num_pixels, tag_dimension)
 
         self.softmax = nn.Softmax(dim = 1) # 1?
 
+    def init_weights(self):
+        """
+        Initializes some parameters with values from the uniform distribution, for easier convergence.
+        """
+        self.mlc.bias.data.fill_(0)
+        self.mlc.weight.data.uniform_(-0.1, 0.1)
+
     def forward(self, visual_features):
         print('qweqweqweqweqweqweqwe')
-
-        tags = self.mlc(visual_features)
+        mlc_encoding = visual_features.contiguous().view(1, self.encoder_dimension*self.num_pixels)
+        tags = self.mlc(mlc_encoding)
         tags_softmax = self.softmax(tags) #????
         return tags_softmax
 
