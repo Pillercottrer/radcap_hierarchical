@@ -98,7 +98,7 @@ topic_vectors = topic_vectors.unsqueeze(0)
 
 word_lstm = WordLSTMDecoder(vocab_size)
 word_lstm.to(device)
-word_lstm(topic_vectors, target_paragraphs, num_sents, paragraph_sent_lengths)
+word_lstm(topic_vectors, num_sents, target_paragraphs, paragraph_sent_lengths)
 
 
 

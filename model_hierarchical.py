@@ -321,12 +321,14 @@ class SentenceLSTMDecoder(nn.Module):
         return topic_tensor, stop_tensor
 
 class WordLSTMDecoder(nn.Module):
-    def __init__(self, vocab_size, topic_vector_size = 111, num_layers = 1, embed_size = 512, hidden_size = 512, max_seq_length=20):
+    def __init__(self, vocab_size, topic_vector_size = 111, num_layers = 1, embed_size = 512, hidden_size = 512, max_num_sents = 8, max_seq_length=20):
         super(WordLSTMDecoder, self).__init__()
         self.embed = nn.Embedding(vocab_size, embed_size)
         self.lstm = nn.LSTMCell(topic_vector_size, hidden_size, bias=True)
         self.linear = nn.Linear(hidden_size, vocab_size)
         self.max_seg_length = max_seq_length
+        self.max_num_sents = max_num_sents
+        self.vocab_size = vocab_size
 
         self.init_h = nn.Linear(topic_vector_size, hidden_size)
         self.init_c = nn.Linear(topic_vector_size, hidden_size)
@@ -340,33 +342,42 @@ class WordLSTMDecoder(nn.Module):
 
     def forward(self, topic_vectors, num_sents, paragraphs, sentence_lengths):
         """Decode topic vectors and generates captions."""
-        """Topic vectors: 3D tensor (batch_size, num_topic vectors, )"""
+        """Topic vectors: 3D tensor (batch_size, num_topic vectors, topic_vec_dim)"""
         """Number of sentences is a 1d tensor (batch size, 1)"""
-        """Paragraphs is a 3d tensor of  (batch size, max_sentence_length, max_sents)"""
+        """Paragraphs is a 3d tensor of  (batch size, max_sents, max_sentence_length)"""
         """Sentence lengths is a 2d tensor (batch size, max_sents)"""
 
         batch_size = topic_vectors.size(0)
-        topic_vector_size = topic_vectors.size(1)
+        max_num_topic_vectors = topic_vectors.size(1)
         topic_vector_dim = topic_vectors.size(-1)
         vocab_size = self.vocab_size
 
         num_sents, sort_ind = num_sents.sort(dim=0, descending=True)
+        #sentence_lengths, sort_ind = sentence_lengths.sort(dim=1, descending=True)
+        topic_vectors = topic_vectors[sort_ind]
+        paragraphs = paragraphs[sort_ind]
+        sentence_lengths = sentence_lengths[sort_ind]
 
+        # Create tensors to hold word predicion scores and alphas
+        predictions = torch.zeros(batch_size, self.max_num_sents, self.max_seg_length, vocab_size).to(device)
+
+        #naive implementation (consider each topic vector separetely)
         outputs = 'a'
-        for i in range(topic_vector_size):  #Generate sentence from all topic_vectors
-            topic = topic_vectors[:,i]
-            captions = paragraphs[:,i,:]
-            lengths = sentence_lengths[:,i]
+        for i in range(self.max_num_sents):  #Generate sentence from all topic_vectors
+            batch_size_i = sum([l > i for l in num_sents])
+            topics = topic_vectors[:batch_size_i,i]
+            captions = paragraphs[:batch_size_i,i,:]
+            lengths = sentence_lengths[:batch_size_i,i]
 
             # Sort input data by decreasing lengths; why? apparent below (joke, its not so apparent)
             caption_lengths, sort_ind = lengths.sort(dim=0, descending=True)
-            topic = topic[sort_ind]
+            topics = topics[sort_ind]
             captions = captions[sort_ind]
 
             # Embedding
             embeddings = self.embedding(captions)  # (batch_size, max_caption_length, embed_dim)
 
-            # Initialize LSTM state
+            # Initialize LSTM state (0-tensors)
             h, c = self.init_hidden_state(batch_size)  # (batch_size, decoder_dim)
 
             # We won't decode at the <end> position, since we've finished generating as soon as we generate <end>
@@ -374,10 +385,16 @@ class WordLSTMDecoder(nn.Module):
             decode_lengths = (caption_lengths - 1).tolist()
 
             # Create tensors to hold word predicion scores and alphas
-            predictions = torch.zeros(batch_size, max(decode_lengths), vocab_size).to(device)
+            #predictions = torch.zeros(batch_size, max(decode_lengths), vocab_size).to(device)
 
+            # Proceed one time-step with topic vector as input
+            h, c = self.lstm(topics)
             for j in range(self.max_seg_length):
-                print('test')
+                #the extra mile
+                batch_size_j = sum([l > j for l in num_sents])
+                h, c = self.lstm(embeddings[:batch_size_j, j, :], (h[:batch_size_j], c[:batch_size_j]))  # (batch_size_j, decoder_dim)
+                preds = self.linear(self.dropout(h))  # (batch_size_j, vocab_size)
+                predictions[:batch_size_j, i, j, :] = preds
 
 
 
